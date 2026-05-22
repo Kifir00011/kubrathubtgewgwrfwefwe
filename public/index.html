@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>File Tunnel — загрузка и скачивание</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --card: #1a2332;
+      --accent: #3b82f6;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 2rem 1rem;
+    }
+    .wrap { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
+    p { color: var(--muted); margin: 0 0 1.5rem; }
+    .drop {
+      border: 2px dashed #334155;
+      border-radius: 12px;
+      padding: 2.5rem 1rem;
+      text-align: center;
+      background: var(--card);
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .drop.drag { border-color: var(--accent); background: #1e3a5f; }
+    input[type="file"] { display: none; }
+    button {
+      margin-top: 1rem;
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      padding: 0.65rem 1.2rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .progress {
+      margin-top: 1rem;
+      height: 8px;
+      background: #334155;
+      border-radius: 4px;
+      overflow: hidden;
+      display: none;
+    }
+    .progress span {
+      display: block;
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width 0.15s;
+    }
+    .status { margin-top: 0.75rem; font-size: 0.9rem; color: var(--muted); min-height: 1.2em; }
+    .list { margin-top: 2rem; }
+    .list h2 { font-size: 1.1rem; margin-bottom: 0.75rem; }
+    .file {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.75rem 1rem;
+      background: var(--card);
+      border-radius: 8px;
+      margin-bottom: 0.5rem;
+      word-break: break-all;
+    }
+    .file a { color: #93c5fd; text-decoration: none; }
+    .file a:hover { text-decoration: underline; }
+    .meta { font-size: 0.85rem; color: var(--muted); }
+    .del {
+      background: transparent;
+      color: #f87171;
+      border: 1px solid #7f1d1d;
+      margin-top: 0;
+      padding: 0.35rem 0.6rem;
+      font-size: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>File Tunnel</h1>
+    <p>Загрузка любого размера (лимит — диск и время). Скачивание по прямой ссылке.</p>
+    <p id="pagesHint" class="meta" style="display:none;margin-bottom:1rem;">
+      GitHub Pages — только интерфейс. Укажи URL работающего сервера (<code>python server.py</code>).
+    </p>
+    <label class="meta" style="display:block;margin-bottom:1rem;">
+      API сервер:
+      <input type="text" id="apiBase" placeholder="http://127.0.0.1:3847" style="width:100%;margin-top:0.35rem;padding:0.5rem;border-radius:6px;border:1px solid #334155;background:#0f1419;color:#e7ecf3;" />
+    </label>
+
+    <div class="drop" id="drop">
+      Перетащите файлы сюда или нажмите для выбора
+      <input type="file" id="picker" multiple />
+    </div>
+    <button type="button" id="uploadBtn" disabled>Загрузить</button>
+    <div class="progress" id="progress"><span></span></div>
+    <div class="status" id="status"></div>
+
+    <div class="list">
+      <h2>Файлы на сервере</h2>
+      <div id="files">Загрузка списка…</div>
+    </div>
+  </div>
+  <script src="config.js"></script>
+  <script>
+    function apiBase() {
+      const input = document.getElementById("apiBase");
+      const v = (input && input.value.trim()) || window.FILE_TUNNEL_API_BASE || "";
+      return v.replace(/\/$/, "");
+    }
+    function apiUrl(path) {
+      const base = apiBase();
+      return base ? base + path : path;
+    }
+    if (location.hostname.endsWith("github.io")) {
+      document.getElementById("pagesHint").style.display = "block";
+      const saved = localStorage.getItem("fileTunnelApiBase");
+      if (saved) document.getElementById("apiBase").value = saved;
+    }
+    document.getElementById("apiBase").addEventListener("change", (e) => {
+      localStorage.setItem("fileTunnelApiBase", e.target.value.trim());
+      refreshList();
+    });
+
+    const drop = document.getElementById("drop");
+    const picker = document.getElementById("picker");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const progress = document.getElementById("progress");
+    const progressBar = progress.querySelector("span");
+    const status = document.getElementById("status");
+    const filesEl = document.getElementById("files");
+    let queue = [];
+
+    function fmt(bytes) {
+      if (bytes < 1024) return bytes + " B";
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+      if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+      return (bytes / 1024 / 1024 / 1024).toFixed(2) + " GB";
+    }
+
+    function setQueue(files) {
+      queue = [...files];
+      uploadBtn.disabled = queue.length === 0;
+      status.textContent = queue.length
+        ? "Выбрано: " + queue.map((f) => f.name + " (" + fmt(f.size) + ")").join(", ")
+        : "";
+    }
+
+    drop.addEventListener("click", () => picker.click());
+    picker.addEventListener("change", () => setQueue(picker.files));
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("drag"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      drop.classList.remove("drag");
+      setQueue(e.dataTransfer.files);
+    });
+
+    async function refreshList() {
+      const res = await fetch(apiUrl("/api/files"));
+      if (!res.ok) {
+        filesEl.innerHTML = "<p class='meta'>Не удалось загрузить список (перезагрузи страницу)</p>";
+        return;
+      }
+      const data = await res.json();
+      if (!data.files.length) {
+        filesEl.innerHTML = "<p class='meta'>Пока пусто</p>";
+        return;
+      }
+      filesEl.innerHTML = data.files.map((f) => {
+        const rel = "/api/download/" + encodeURIComponent(f.name);
+        const dl = f.apiDownloadUrl || apiUrl(rel);
+        return `
+        <div class="file">
+          <div>
+            <a href="${dl}" download>${f.name}</a>
+            <div class="meta">${fmt(f.size)} · ${new Date(f.mtime).toLocaleString()}</div>
+          </div>
+          <button class="del" data-name="${encodeURIComponent(f.name)}">Удалить</button>
+        </div>`;
+      }).join("");
+      filesEl.querySelectorAll(".del").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          if (!confirm("Удалить файл?")) return;
+          await fetch(apiUrl("/api/files/" + btn.dataset.name), { method: "DELETE" });
+          refreshList();
+        });
+      });
+    }
+
+    uploadBtn.addEventListener("click", () => {
+      if (!queue.length) return;
+      const fd = new FormData();
+      queue.forEach((f) => fd.append("files", f));
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", apiUrl("/api/upload"));
+      progress.style.display = "block";
+      progressBar.style.width = "0%";
+      uploadBtn.disabled = true;
+      status.textContent = "Загрузка…";
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          progressBar.style.width = Math.round((e.loaded / e.total) * 100) + "%";
+        }
+      };
+      xhr.onload = () => {
+        progress.style.display = "none";
+        uploadBtn.disabled = false;
+        if (xhr.status >= 200 && xhr.status < 300) {
+          status.textContent = "Готово";
+          setQueue([]);
+          picker.value = "";
+          refreshList();
+        } else {
+          status.textContent = "Ошибка: " + xhr.responseText;
+        }
+      };
+      xhr.onerror = () => {
+        progress.style.display = "none";
+        uploadBtn.disabled = false;
+        status.textContent = "Сетевая ошибка";
+      };
+      xhr.send(fd);
+    });
+
+    refreshList();
+    setInterval(refreshList, 15000);
+  </script>
+</body>
+</html>

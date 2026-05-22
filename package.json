@@ -1,0 +1,15 @@
+{
+  "name": "file-tunnel-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "File upload/download host exposed via localtunnel",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "tunnel": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}
