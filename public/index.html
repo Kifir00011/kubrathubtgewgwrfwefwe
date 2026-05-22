@@ -93,7 +93,10 @@
     <h1>File Tunnel</h1>
     <p>Загрузка любого размера (лимит — диск и время). Скачивание по прямой ссылке.</p>
     <p id="pagesHint" class="meta" style="display:none;margin-bottom:1rem;">
-      GitHub Pages — только интерфейс. Укажи URL работающего сервера (<code>python server.py</code>).
+      Ты на GitHub Pages (HTTPS). К <code>http://127.0.0.1</code> браузер <strong>не подключится</strong>.
+      Запусти <code>python server.py</code> и открой
+      <a id="localOpenLink" href="http://127.0.0.1:3847/">http://127.0.0.1:3847/</a>
+      или вставь <strong>https://</strong> ссылку туннеля (ngrok / cloudflared).
     </p>
     <label class="meta" style="display:block;margin-bottom:1rem;">
       API сервер:
@@ -124,12 +127,50 @@
       const base = apiBase();
       return base ? base + path : path;
     }
-    if (location.hostname.endsWith("github.io")) {
-      document.getElementById("pagesHint").style.display = "block";
-      const saved = localStorage.getItem("fileTunnelApiBase");
-      if (saved) document.getElementById("apiBase").value = saved;
+    function isLocalHttp(url) {
+      try {
+        const u = new URL(url);
+        return u.protocol === "http:" && (u.hostname === "127.0.0.1" || u.hostname === "localhost");
+      } catch {
+        return false;
+      }
     }
-    document.getElementById("apiBase").addEventListener("change", (e) => {
+    function validateApiBase() {
+      const base = apiBase();
+      if (!base) {
+        return { ok: false, msg: "Укажи URL API сервера или открой сайт напрямую: <a href='http://127.0.0.1:3847/'>http://127.0.0.1:3847/</a>" };
+      }
+      if (location.protocol === "https:" && base.startsWith("http://")) {
+        return {
+          ok: false,
+          msg: "HTTPS страница (GitHub Pages) не может вызывать HTTP API. Открой <a href='" + base + "'>" + base + "</a> в новой вкладке или укажи <strong>https://</strong> URL туннеля.",
+        };
+      }
+      return { ok: true };
+    }
+    function initApiField() {
+      const input = document.getElementById("apiBase");
+      const onPages = location.hostname.endsWith("github.io");
+      const onLocalServer = location.port === "3847" || (location.hostname === "127.0.0.1" && location.pathname !== "/kubrathubtgewgwrfwefwe/");
+
+      if (onLocalServer) {
+        input.value = location.origin;
+        document.getElementById("pagesHint").style.display = "none";
+        return;
+      }
+      if (onPages) {
+        document.getElementById("pagesHint").style.display = "block";
+        const saved = localStorage.getItem("fileTunnelApiBase");
+        if (saved && !(location.protocol === "https:" && isLocalHttp(saved))) {
+          input.value = saved;
+        } else {
+          input.value = "";
+          input.placeholder = "https://xxxx.trycloudflare.com";
+        }
+      }
+    }
+    initApiField();
+    document.getElementById("apiBase").addEventListener("input", (e) => {
       localStorage.setItem("fileTunnelApiBase", e.target.value.trim());
       refreshList();
     });
@@ -169,9 +210,22 @@
     });
 
     async function refreshList() {
-      const res = await fetch(apiUrl("/api/files"));
+      const check = validateApiBase();
+      if (!check.ok) {
+        filesEl.innerHTML = "<p class='meta'>" + check.msg + "</p>";
+        return;
+      }
+      filesEl.innerHTML = "<p class='meta'>Загрузка списка…</p>";
+      let res;
+      try {
+        res = await fetch(apiUrl("/api/files"));
+      } catch (err) {
+        filesEl.innerHTML = "<p class='meta'>Сеть: " + err.message + ". Сервер запущен? CORS/HTTPS?</p>";
+        return;
+      }
       if (!res.ok) {
-        filesEl.innerHTML = "<p class='meta'>Не удалось загрузить список (перезагрузи страницу)</p>";
+        const text = await res.text();
+        filesEl.innerHTML = "<p class='meta'>API ошибка " + res.status + ": " + text.slice(0, 200) + "</p>";
         return;
       }
       const data = await res.json();
@@ -202,6 +256,11 @@
 
     uploadBtn.addEventListener("click", () => {
       if (!queue.length) return;
+      const check = validateApiBase();
+      if (!check.ok) {
+        status.innerHTML = check.msg;
+        return;
+      }
       const fd = new FormData();
       queue.forEach((f) => fd.append("files", f));
       const xhr = new XMLHttpRequest();
